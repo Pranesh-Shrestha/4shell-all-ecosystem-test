@@ -1,0 +1,271 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# BAF CVE detection test: Nov 2026 runtime CVEs
+# Goal: see what BAF can observe when vulnerable RUNTIMES / packages enter a build.
+#   - Package-level CVE   → should hit existing CVE policy
+#   - Runtime-level CVE   → check: download URL? User-Agent? nothing?
+# Each ecosystem is its own job = its own tab in the BAF dashboard.
+# NOTE: nothing here exploits anything, it only installs vulnerable versions.
+# ─────────────────────────────────────────────────────────────────────────────
+name: BAF - Nov 2026 runtime CVE detection
+
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # NODE.JS - Node2Shell (CVE-2026-111497) | vulnerable: 24.22.0, fixed: 24.22.1
+  # EXPECT: nodejs.org / node-versions download URL with version
+  #         npm UA → "npm/x node/v24.22.0 ..."
+  #         express@5 + body-parser@2 = the Brotli-decoding path
+  # ═══════════════════════════════════════════════════════════════════════════
+  node:
+    name: node (Node2Shell)
+    runs-on: ubuntu-latest
+    steps:
+      - &baf_setup
+        name: Setup PSE
+        uses: invisirisk/pse-action@latest
+        with:
+          api_url: "https://app.invisirisk.com"
+          app_token: ${{ secrets.IR_RUNTIME }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.0'
+
+      - name: Versions
+        run: node --version && npm --version && npm config get user-agent
+
+      - name: npm install (Express 5 / body-parser 2)
+        run: |
+          mkdir app && cd app && npm init -y >/dev/null
+          npm install express@5 body-parser@2 --no-audit --no-fund
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # BUN - Node2Shell | vulnerable: 1.4.3, fixed: 1.4.4
+  # EXPECT: bun download URL (github releases) + "Bun/1.4.3" UA on registry calls
+  # ═══════════════════════════════════════════════════════════════════════════
+  bun:
+    name: bun (Node2Shell)
+    runs-on: ubuntu-latest
+    steps:
+      - *baf_setup
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.3'
+      - name: Versions
+        run: bun --version
+      - name: bun add express
+        run: |
+          mkdir app && cd app && bun init -y >/dev/null
+          bun add express@5
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # PYTHON - HTTP2Shell (CVE-2026-111497 in PyPI Brotli / brotlicffi)
+  # vulnerable: Brotli <=1.2.0, brotlicffi 1.2.0.x | fixed: 1.2.1 / 1.2.1.0
+  # EXPECT: ✅ package-level CVE alert (PyPI is a known ecosystem)
+  #         httpx[brotli] = transitive pull-in case
+  #         pip UA JSON → python + openssl version
+  # ═══════════════════════════════════════════════════════════════════════════
+  python:
+    name: python (Brotli HTTP2Shell)
+    runs-on: ubuntu-latest
+    steps:
+      - *baf_setup
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Versions
+        run: python --version && pip --version
+      - name: Direct install (vulnerable pins)
+        run: |
+          pip install --no-cache-dir "Brotli==1.2.0" "brotlicffi<1.2.1.0" requests
+      - name: Transitive install (httpx[brotli] in fresh venv)
+        run: |
+          python -m venv /tmp/v2 && /tmp/v2/bin/pip install --no-cache-dir "httpx[brotli]" "Brotli<=1.2.0"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # RUBY - Ruby2Shell (CVE-2026-132825) | vulnerable: 3.3.13, fixed: 3.3.14
+  # EXPECT: ruby-builder download URL with version
+  #         bundler UA → "bundler/x rubygems/x ruby/3.3.13 ..."
+  # ═══════════════════════════════════════════════════════════════════════════
+  ruby:
+    name: ruby (Ruby2Shell)
+    runs-on: ubuntu-latest
+    steps:
+      - *baf_setup
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3.13'
+          bundler-cache: false
+      - name: Versions
+        run: ruby --version && gem --version && bundle --version
+      - name: gem + bundler install (Sinatra = default-exposed app type)
+        run: |
+          gem install rack --no-document
+          # Brotli copy in a gem: brotli < 0.9.1 bundles vulnerable decoder (package-level CVE)
+          gem install brotli -v '< 0.9.1' --no-document || echo "brotli gem install failed"
+          mkdir app && cd app
+          printf 'source "https://rubygems.org"\ngem "sinatra"\n' > Gemfile
+          bundle install
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # PHP - Nov 19 release (CVE-2026-115560, CVE-2026-129289 + 16 more)
+  # vulnerable: 8.4.27, fixed: 8.4.28
+  # setup-php can't pin a patch version → use the official container image.
+  # EXPECT: no PHP download at all (it's in the image)
+  #         apt .deb URLs (unzip/git) → tests OS-package visibility
+  #         Composer UA → "Composer/2.x (Linux; ...; PHP 8.4.27; ...)"
+  # NOTE: pse-action runs inside the container here (container job).
+  # ═══════════════════════════════════════════════════════════════════════════
+  php:
+    name: php (Nov 19 CVEs)
+    runs-on: ubuntu-latest
+    container:
+      image: php:8.4.27-cli
+    steps:
+      - *baf_setup
+      - name: Versions
+        run: php --version
+      - name: apt deps
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends unzip git
+      - name: Composer install + require
+        run: |
+          curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+          composer --version
+          mkdir app && cd app
+          composer init -n --name=test/app
+          composer require monolog/monolog guzzlehttp/guzzle -n
+      - name: PECL brotli extension (< 0.21.1 bundles vulnerable decoder)
+        continue-on-error: true
+        run: |
+          # pecl.php.net is NOT Packagist → tests whether BAF classifies PECL at all
+          pecl download brotli-0.21.0 || pecl download brotli
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JAVA - Java4Shell (CVE-2026-114938) | vulnerable: Temurin 17.0.21+9
+  # fixed: 17.0.21.1+2
+  # EXPECT: adoptium / github download URL with version
+  #         Maven UA → "Apache-Maven/3.9.x (Java 17.0.21; Linux ...)"
+  # NOTE: JVM needs BAF CA in its truststore (keytool) + Maven proxy config,
+  #       same as your existing maven pipelines.
+  # ═══════════════════════════════════════════════════════════════════════════
+  java:
+    name: java (Java4Shell)
+    runs-on: ubuntu-latest
+    steps:
+      - *baf_setup
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17.0.21+9'
+      - name: Versions
+        run: java -version && mvn -version
+      - name: Maven fetch
+        run: |
+          mvn -B dependency:get -Dartifact=org.apache.commons:commons-lang3:3.14.0
+          mvn -B dependency:get -Dartifact=com.google.guava:guava:33.0.0-jre
+          # Brotli copy in Maven: brotli4j <= 1.23.0 bundles vulnerable native decoder (fixed 1.24.0)
+          mvn -B dependency:get -Dartifact=com.aayushatharva.brotli4j:brotli4j:1.23.0
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GO - Brotli copy: github.com/andybalholm/brotli (pure-Go port, also shipped a fix)
+  # EXPECT: ✅ package-level CVE alert IF the advisory is in your Go feed
+  #         (your earlier 3-ecosystems run pulled v1.0.4 as .mod only, no .zip)
+  # ═══════════════════════════════════════════════════════════════════════════
+  go:
+    name: go (andybalholm/brotli)
+    runs-on: ubuntu-latest
+    steps:
+      - *baf_setup
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Versions
+        run: go version
+      - name: go get (forces .zip download)
+        run: |
+          mkdir app && cd app && go mod init example.com/app
+          go get github.com/andybalholm/brotli@v1.0.4
+          go mod download -x github.com/andybalholm/brotli
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # DOCKER BUILD - vulnerable base images, built through BAF's BuildKit frontend
+  # Most realistic case: a Dockerfile pinned to an old runtime image.
+  # EXPECT per image:
+  #   - base image pull (FROM)  → visible? (does the frontend proxy the pull?)
+  #   - RUN npm/pip/gem/composer/mvn → UA should carry the image's runtime version
+  #   - nginx/httpd: only apt traffic, version only knowable from the image tag
+  # One matrix entry = one job = one tab.
+  # ═══════════════════════════════════════════════════════════════════════════
+  docker:
+    name: docker (${{ matrix.img }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        img: [node, python, ruby, php, java, nginx, httpd]
+    steps:
+      - *baf_setup
+      - name: Write Dockerfile
+        run: |
+          mkdir -p docker
+          f=docker/Dockerfile
+          case "${{ matrix.img }}" in
+            node) cat > $f <<'DOCKER'
+          FROM node:24.22.0
+          RUN mkdir /app && cd /app && npm init -y && npm install express@5 body-parser@2 --no-audit --no-fund
+          DOCKER
+            ;;
+            python) cat > $f <<'DOCKER'
+          FROM python:3.12-slim
+          RUN pip install --no-cache-dir "Brotli==1.2.0" "brotlicffi<1.2.1.0" requests
+          DOCKER
+            ;;
+            ruby) cat > $f <<'DOCKER'
+          FROM ruby:3.3.13
+          RUN gem install rack --no-document && gem install brotli -v '< 0.9.1' --no-document
+          DOCKER
+            ;;
+            php) cat > $f <<'DOCKER'
+          FROM php:8.5.12-cli
+          RUN apt-get update && apt-get install -y --no-install-recommends unzip git \
+           && curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer \
+           && mkdir /app && cd /app && composer init -n --name=test/app \
+           && composer require monolog/monolog guzzlehttp/guzzle -n
+          DOCKER
+            ;;
+            java) cat > $f <<'DOCKER'
+          FROM eclipse-temurin:17.0.21_9-jdk
+          RUN apt-get update && apt-get install -y --no-install-recommends curl \
+           && curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz | tar xz -C /opt \
+           && /opt/apache-maven-3.9.9/bin/mvn -B dependency:get -Dartifact=com.aayushatharva.brotli4j:brotli4j:1.23.0
+          DOCKER
+            ;;
+            nginx) cat > $f <<'DOCKER'
+          FROM nginx:1.31.8
+          RUN apt-get update && apt-get install -y --no-install-recommends curl
+          DOCKER
+            ;;
+            httpd) cat > $f <<'DOCKER'
+          FROM httpd:2.4.70
+          RUN apt-get update && apt-get install -y --no-install-recommends curl
+          DOCKER
+            ;;
+          esac
+          sed -i 's/^          //' $f
+          cat $f
+      - name: Build Docker image (through BAF)
+        run: |
+          docker build -f docker/Dockerfile -t cve-${{ matrix.img }} \
+            --build-arg BUILDKIT_SYNTAX=public.ecr.aws/w3c0c0n7/invisirisk/baf-buildkit:latest \
+            --secret id=pse-ca,src=/etc/ssl/certs/pse.pem \
+            --build-arg PSE_PROXY=http://${PSE_PROXY_IP}:3128 \
+            docker
