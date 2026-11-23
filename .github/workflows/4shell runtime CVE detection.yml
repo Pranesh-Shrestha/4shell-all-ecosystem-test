@@ -10,7 +10,7 @@ name: BAF - Nov 2026 runtime CVE detection
 
 on:
   workflow_dispatch:
-
+  
 defaults:
   run:
     shell: bash
@@ -32,7 +32,7 @@ jobs:
         uses: invisirisk/pse-action@latest
         with:
           api_url: "https://app.invisirisk.com"
-          app_token: ${{ secrets.IR_RUNTIME }}
+          app_token: ${{ secrets.IR_TEST }}
 
       - uses: actions/setup-node@v4
         with:
@@ -161,7 +161,12 @@ jobs:
     name: java (Java4Shell)
     runs-on: ubuntu-latest
     steps:
-      - *baf_setup
+      - name: Setup PSE (sidecar mode for Java)
+        uses: invisirisk/pse-action@latest
+        with:
+          api_url: "https://app.invisirisk.com"
+          app_token: ${{ secrets.IR_RUNTIME }}
+          mode: sidecar
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
