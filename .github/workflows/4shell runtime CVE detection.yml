@@ -32,7 +32,7 @@ jobs:
         uses: invisirisk/pse-action@latest
         with:
           api_url: "https://app.invisirisk.com"
-          app_token: ${{ secrets.IR_TEST }}
+          app_token: ${{ secrets.IR_RUNTIME }}
 
       - uses: actions/setup-node@v4
         with:
